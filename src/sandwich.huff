@@ -1,0 +1,149 @@
+/* 外部接口function transfer, swap, balance , recoverERC20 */
+#define function transfer(address,uint256) nonpayable returns ()
+#define function swap(uint256,uint256,address, bytes) nonpayable returns ()
+#define function balanceOf(address) view returns (uint256)
+#define function recoverERC20(address) nonpayable returns ()
+
+#define constant TRANSFER_SIG = 0xa9059cbb00000000000000000000000000000000000000000000000000000000
+#define constant V2_SWAP_SIG = 0x022c0d9f00000000000000000000000000000000000000000000000000000000
+
+/* 合约的所有者提供特定的存储位置 stack */
+#define constant OWNER = FREE_STORAGE_POINTER()
+
+/* constructor宏定义 */
+#define macro CONSTRUCTOR() = takes(0) returns(0) {
+    caller // 3 gas
+    [OWNER] sstore // 100 gas
+}
+
+/* 定义不同错误,为了区分 */
+#define macro ERROR_1() = takes(0) returns (0) {
+    0x00 dup1 revert
+}
+
+#define macro ERROR_2() = takes (0) returns (0) {
+    0x01 dup1 revert
+}
+
+#define macro ERROR_3() = takes (0) returns (0) {
+    0x02 dup1 revert
+}
+
+/* ONLY_OWNER 函数, 判断合约是否是owner调用 */
+#define macro ONLY_OWNER() = takes (0) returns (0) {
+    [OWNER] sload // [owner] 100 gas
+    caller eq OWNER_SUCCESS jumpi // [msg.sender , msg.sender] 3 gas + 10 gas
+    ERROR_1()
+    OWNER_SUCCESS:
+}
+
+/* GET_BALANCE 函数, 获取有多少金额的token */
+#define macro TOKEN_BALANCE() = takes (1) returns (2) {
+     // Input stack:  [token]
+     // 参数需要放到内存中
+     __FUNC_SIG(balanceOf) 0x00 mstore // 3 gas + 2 gas + 2 gas
+     address 0x20 mstore // 2 gas + 3 gas + 3 gas memory [token]
+     0x20 // [retSize, token] 3 gas
+     0x00 // [retOffset, retSize, token] 3 gas
+     0x24 // [argsSize, retOffset, retSize, token] 3 gas 1个函数签名 + address参数 (4字节 + 32字节)
+     // 32字节 - 4字节 https://www.appsloveworld.com/ethereum/93/call-another-contract-with-huff
+     0x1c // [argOffset, argsSize, retOffset, retSize, token] 3 gas
+     dup5 // 3 gas [to, argOffset, argsSize, retOffset, retSize, token]
+     gas  // 2 gas [gas, token_address, argOffset, argsSize, retOffset, retSize, token]
+     staticcall  // [success, token] 100 gas
+     iszero BALANCE_FAIL jumpi      // [token] 10 gas
+     0x00 mload  // [balance, token]
+     BALANCE_FAIL:
+        ERROR_1()
+}
+
+/* recover_erc20函数 */
+#define macro RECOVER_ERC20() = takes (0) returns (0) {
+    0x04 calldataload // [token] 3 gas  前四个字节是函数签名,跳过,从第四个字节开始加载数据
+    TOKEN_BALANCE() // [balance, token]
+    [TRANSFER_SIG] 0x00 mstore // 2 gas + 3 gas
+    caller 0x20 mstore // 2 gas +  3 gas + 3 gas
+    0x40 mstore // [token], balance这里被提到内存去了
+
+    0x00 // [retSize, token] 2 gas
+    0x00 // [retOffset, retSize, token] 2 gas
+    0x44 // [argSize, retOffset , retSize, token] 3 gas  函数签名 4字节 + 两个参数分别为32字节
+    0x1c // [argOffset, argSize, retOffset, retSize, token] 3 gas
+
+    0x00 // [value, argOffset, argSize, retOffset, retSize, token] // 3 gas
+    dup6 // [to, value, argOffset, argSize, retOffset, retSize, token] // 3 gas
+    gas  // [gas, to, value, argOffset, argSize, retOffset, retSize, token] 3 gas
+    call // [result, token]
+    iszero RECOVER_ERC20_FAIL jumpi
+    stop
+    RECOVER_ERC20_FAIL:
+       ERROR_2()
+}
+
+/* 合约的主入口 */
+#define macro MAIN() = takes(0) returns(0) {
+    // 判断是否为owner调用
+    ONLY_OWNER()
+    // 获取函数签名
+    0x00 calldataload //  2 gas + 3 gas [calldata]
+    0xe0 shr // 3 gas + 3 gas [call_selector]
+    dup1 __FUNC_SIG(recoverERC20) // 3 gas [selector, call_selector]
+    eq RECOVER_ERC20 jumpi  // 3 gas + (? 10 gas)
+    // 执行正常逻辑部分
+    // 1. 拆分
+    0x00 calldataload 0x60 shr // [token] 2 + 3 + 3 + 3 gas
+    0x14 calldataload 0x60 shr // [pair, token] 2 + 3 + 3 + 3 gas
+    0x28 calldataload 0x80 shr // [amountIn, pair, token] 2 + 3 + 3 + 3 gas
+    0x38 calldataload 0x80 shr // [amountOut, amountIn, pair ,token] 2 + 3 + 3 + 3 gas
+    0x48 calldataload 0xf8 shr // [tokenOut, amountOut, amountIn, pair, token] 2 + 3 + 3 + 3 gas
+
+    // 2. transfer 流程
+    [TRANSFER_SIG] 0x00 mstore //  memory:[sig]
+    dup4 0x20 mstore // 3 gas + 3 gas + 3 gas memory: [sig, token]
+    dup3 0x40 mstore // 3 gas + 3 gas + 3 gas memory: [sig, token, amount]
+
+    0x00  // [retSize, tokenOut, amountOut, amountIn, pair, token] 2 gas
+    0x00  // [retOffset, retSize, tokenOut, amountOut, amountIn, pair, token] 2 gas
+    0x60  // [argSize, retOffset, retSize, tokenOut, amountOut, amountIn, pair, token] 3 gas
+    0x1c  // [argOffset, argSize, retOffset, retSize, tokenOut, amountOut, amountIn, pair, token] 3 gas
+    0x00  // [value, argOffset, argSize, retOffset, retSize, tokenOut, amountOut, amountIn, pair, token] 3 gas
+    dup10 // [to, value, argOffset,argSize, retOffset, retSize, tokenOut, amountOut, amountIn, pair, token] 3 gas
+    gas   // [gas, to, value, argOffset,argSize, retOffset, retSize, tokenOut, amountOut, amountIn, pair, token] 3 gas
+    call  // [result, tokenOut, amountOut, amountIn, pair, token] 100 gas
+
+    iszero ERROR_2 jumpi // [tokenOut, amountOut, amountIn, pair, token]
+
+    // 3. swap 流程
+    [V2_SWAP_SIG] 0x00 mstore // 2 gas + 3 gas
+    iszero Token_Out jumpi // [amountOut, amountIn, pair , token]
+    0x00 0x20 mstore // [amountOut, amountIn, pair, token] 2 gas + 2 gas + 3 gas
+    0x40 mstore // [amountIn, pair, token] 3 gas + 3 gas
+    Continue_Swap jumpi
+
+    Token_Out:
+    0x20 mstore // 3 gas + 3 gas
+    0x00 0x40 mstore // 2 gas + 3 gas + 3 gas
+
+    Continue_Swap:
+    ADDRESS 0x60 mstore // 3 gas + 3 gas + 3 gas
+    0xa0 0x80 mstore // 3 gas + 3 gas + 3 gas
+
+    0x00 // [retSize, amountIn, pair, token] 2 gas
+    0x00 // [retOffset, retSize, amountIn, pair, token] 2 gas
+    0xc0 // [argSize, retOffset, retSize, amountIn, pair, token] 3 gas
+    0x1c // [argsOffset, argSize, retOffset, retSize, amountIn, pair, token] 3 gas
+    0x00 // [value, argsOffset, argSize, retOffset, retSize, amountIn, pair, token] 2 gas
+    dup7 // [to, value, argsOffset, argSize, retOffset, retSize, amountIn, pair, token] 3 gas
+    gas  // [gas, to, value, argsOffset, argSize, retOffset, retSize, amountIn, pair, token] 3 gas
+    call // [result, amountIn, pair, token] 100 gas
+    iszero ERROR_3 jumpi
+
+    stop
+/* 定义不同的标签, 区分不同的函数操作 */
+RECOVER_ERC20:
+    RECOVER_ERC20()
+ERROR_2:
+    ERROR_2()
+ERROR_3:
+    ERROR_3()
+}
